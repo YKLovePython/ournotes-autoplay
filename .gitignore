@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+logs/
+work/last_choice.json
+debug/
+.venv/
+*.zip

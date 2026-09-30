@@ -1,0 +1,82 @@
+# BanG Dream! Our Notes —— 自动演奏配置
+# 所有坐标均为「游戏画面像素」，与设备分辨率一致（默认 1156x2510 竖屏，游戏内横屏）。
+
+device:
+  serial: null            # null = 自动选择第一个在线设备
+  adb_path: "C:/Users/67063/Desktop/_桌面整理_20260730/04_其他项目与代码/platform-tools/adb.exe"
+  screen:
+    width: 2510           # 横屏后的逻辑宽（= 设备物理高）
+    height: 1156
+  orientation: landscape  # 游戏为横屏
+
+touch:
+  # uhid：借 scrcpy-server 注册一块虚拟触摸屏（系统认成真外设，非 root 可用）
+  #       —— 毫秒级、真多指，游戏分不出真假（本机实测创建成功）
+  # 兜底：input（单指、60~80ms）| sendevent（本机 SELinux 拒绝）
+  backend: uhid
+  scrcpy_jar: tools/scrcpy/scrcpy-server-v4.1
+  event_node: /dev/input/event7     # goodix_ts
+  coord_scale: 100         # ABS_MT_POSITION_X 最大值 / 屏幕像素宽 = 100
+  max_slots: 10
+  tap_duration_ms: 40
+  hold_release_pad_ms: 30
+  long_press_min_ms: 120
+
+judgement:
+  # 判定线在屏幕中的 y 像素（横屏坐标）。
+  # 实机标定：两条紫线分别约在 y=877 与 y=960，音符在下面那条被判定。
+  line_y: 960
+  # 音符在判定线上方多远开始触发（提前量，越小越精确但越容易 miss）
+  hit_window_ms: 90
+  # 全局偏移：正数表示提前触发
+  global_offset_ms: 0
+  # 辅助模式：轻扫/滑条只需点按
+  assist_mode: true
+  # 长条尾判取消（本游戏特性）：长按到 duration 后立即释放
+  drop_hold_tail: true
+
+lanes:
+  # 七轨。count=7，坐标可通过 `calibrate` 自动/手动标定。
+  count: 7
+  # 实机标定（判定线 y=960 处的轨中心 x 与轨距）
+  center_x: 1253
+  pitch: 295
+  x: [330, 590, 850, 1110, 1370, 1630, 1890]   # 初始猜测值，务必用 calibrate 校正
+  width: 240
+
+vision:
+  # 实时采集
+  stream_size: "1280x592"
+  # 提前量：补偿 采集+解码+注入 的端到端延迟（毫秒），越大越早按
+  lead_ms: 45
+  # 音符检测
+  detect_roi_top: 100          # ROI 上边界（判定线以上）
+  detect_roi_bottom: 30        # 判定线以下
+  hsv_ranges:                  # 例：常见音符颜色（游戏可换皮肤，需要按皮肤调整）
+    - name: note_light
+      lower: [0, 0, 200]
+      upper: [180, 60, 255]
+  min_area: 120
+  lane_tolerance: 90           # 到轨道中心的容差
+  frame_fps: 30
+
+audio:
+  enabled: false
+  device_audio_capture: false
+
+logging:
+  level: INFO
+  dir: logs
+
+chartdb:
+  # our-notes-chartdb 解包后的目录（含 charts/<musicId>/<difficulty>.json）
+  dir: work/chartdb/out
+
+game:
+  # 「LIVE START」按钮的设备像素坐标（乐队确认页右下角）
+  live_start_button: [2284, 1037]
+  # 演奏画面（判定线）出现 → 谱面时间 0，相隔多少秒
+  # 录像反推：判定线 2.43s 出现，谱面时间 0 在 2.61s，所以是 0.18
+  live_appear_offset_s: 0.18
+  # 点完开始键后，等多少秒才开始按谱面落指（粗调；进曲快就调小）
+  start_delay_s: 10.0

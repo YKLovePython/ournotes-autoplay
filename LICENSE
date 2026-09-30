@@ -1,0 +1,12 @@
+Copyright (c) 2026 作业快没了 (Bilibili). All rights reserved.
+
+This repository is a private archive. No licence is granted for use, copying,
+modification or redistribution of its contents.
+
+Third-party components keep their own licences:
+
+* `tools/scrcpy/scrcpy-server-v4.1` is part of the scrcpy project
+  (https://github.com/Genymobile/scrcpy), Apache License 2.0.
+* `samples/MasterText.json` and `samples/chart_*.json` are derived from the game's
+  published data files and remain the property of their respective rights holders.
+  They are kept here only as a technical sample.
