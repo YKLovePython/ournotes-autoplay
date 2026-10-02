@@ -1,0 +1,5 @@
+TSA: https://freetsa.org/tsr
+状态: 0
+签发时间(UTC): 20261002193036Z
+签名对象: OurNotes-Autoplay-20261003.zip
+SHA-256: 80109e206e2d2562bbea5443ea6307c114765c76d3dce334114827b85215b6af

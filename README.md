@@ -63,6 +63,23 @@ docs/04_时间线.md          开发时间线（时间证据）
 
 `docs/04_时间线.md` 末尾附有本仓库关键文件的 **SHA‑256**，可用于核对之后是否被改动。
 
+### 封存包与第三方时间戳（2026‑10‑03）
+
+除了提交历史，还做了一份**封存 + 三重时间戳**，放在 `timestamp/`：
+
+| 项 | 内容 |
+| --- | --- |
+| 封存包 | `OurNotes-Autoplay-20261003.zip`（149 KB，40 个文件：源码 + 文档 + 作者声明 + 包内逐文件哈希） |
+| SHA‑256 | `80109e206e2d2562bbea5443ea6307c114765c76d3dce334114827b85215b6af` |
+| 比特币 | `*.zip.ots`（OpenTimestamps，写入比特币区块链；已由 4 个公共日历接收） |
+| RFC 3161 | `*.zip.tsr`（FreeTSA 签发，granted，genTime 2026‑10‑02 19:30:36 UTC = 北京 10‑03 03:30） |
+| 证书 | `freetsa_cacert.pem` / `freetsa_tsa.crt` |
+| 验证步骤 | `timestamp/验证方法.md`（含 `ots verify` 与 `openssl ts -verify` 的完整命令） |
+
+**公开仓库**（https://github.com/YKLovePython/bandori-ournotes-autoplay ）的 `proof/` 目录只公开了
+**哈希与时间戳证明**，没有公开代码本体——将来需要主张时把封存包公开即可，哈希对得上就成立，
+验证方不需要信任作者或 GitHub，只需要信任比特币与 TSA。
+
 ## 授权
 
 保留所有权利（见 [LICENSE](LICENSE)）。**未授权转载或再分发**。

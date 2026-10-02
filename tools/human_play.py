@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from bandori_autoplay.adb import AdbDevice  # noqa: E402
+from bandori_autoplay.adb import AdbDevice, AdbError  # noqa: E402
 from bandori_autoplay.capture import ScreenStream  # noqa: E402
 from bandori_autoplay.chartdb import FieldGeometry, load_events  # noqa: E402
 from bandori_autoplay.config import load_config  # noqa: E402
@@ -242,8 +242,14 @@ def build_schedule(events, t0: float, geom: FieldGeometry, start_index: int,
 
 
 # ------------------------------------------------------------------ 选歌
-def song_catalog(chart_dir: Path) -> list[tuple[int, str, list[str]]]:
-    """从谱面索引 + masterdata 文本表拼出「有哪些歌、哪些难度、叫什么」。"""
+def song_catalog(chart_dir: Path) -> list[tuple[int, str, list[str], str]]:
+    """曲目列表 —— **名称与游戏内一致**。
+
+    游戏里显示的是**日文原名**（不做翻译），所以这里用 ``MasterText._japanese``；
+    其它语言只留作搜索别名（想用简中名找也行）。顺序仍按曲目号。
+
+    返回 ``(曲目号, 日文名, 难度列表, 搜索别名)``。
+    """
     index = chart_dir / "index.json"
     if not index.exists():
         return []
@@ -257,16 +263,44 @@ def song_catalog(chart_dir: Path) -> list[tuple[int, str, list[str]]]:
     if text.exists():
         for row in json.loads(text.read_text(encoding="utf-8"))["_allData"]:
             titles[row["_id"]] = row
+    music: dict[int, dict] = {}
+    mfile = ROOT / "work" / "master" / "MasterLiveMusic.json"
+    if mfile.exists():
+        for row in json.loads(mfile.read_text(encoding="utf-8"))["_allData"]:
+            music[int(row["_id"])] = row
 
     order = ["easy", "normal", "hard", "expert"]
-    out = []
+    now = time.time()
+    entries = []
     for mid in sorted(by_music):
-        t = titles.get(f"Music_Tilte_{mid}") or titles.get(f"Music_Title_{mid}") or {}
-        name = (t.get("_simplifiedChinese") or t.get("_traditionalChinese")
-                or t.get("_japanese") or t.get("_english") or "")
+        row = music.get(mid, {})
+        t = (titles.get(str(row.get("_titleTextID") or ""))
+             or titles.get(f"Music_Tilte_{mid}") or titles.get(f"Music_Title_{mid}") or {})
+        # 游戏里显示的是日文原名；其它语言只用来做搜索别名
+        name = (t.get("_japanese") or t.get("_traditionalChinese")
+                or t.get("_simplifiedChinese") or t.get("_english") or "")
+        alias = " ".join(str(t.get(k) or "") for k in
+                         ("_simplifiedChinese", "_traditionalChinese", "_japanese", "_english"))
+        note = ""
+        start = _parse_start(row.get("_startAt"))
+        if start and start > now:
+            note = time.strftime("  预载 %m-%d", time.localtime(start))
         diffs = [d for d in order if d in by_music[mid]]
-        out.append((mid, name or f"(未命名 {mid})", diffs))
-    return out
+        entries.append((mid, (name or f"(未命名 {mid})") + note, diffs, alias))
+    return entries
+
+
+def _parse_start(value) -> float | None:
+    """把 master 里的 ``_startAt`` 解析成时间戳（格式是 ``2026/10/08 21:00:00``）。"""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(s, fmt))
+        except ValueError:
+            continue
+    return None
 
 
 PAGE = 12
@@ -316,7 +350,8 @@ def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
                 or catalog[0])
     page, query = 0, ""
     while True:
-        view = ([s for s in catalog if query.lower() in s[1].lower()]
+        q = query.lower()
+        view = ([s for s in catalog if q in s[1].lower() or q in s[3].lower()]
                 if query else list(catalog))
         if query and not view:
             print(f"    没有匹配「{query}」的曲目，换一个词")
@@ -326,13 +361,13 @@ def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
         page = max(0, min(page, pages - 1))
         chunk = view[page * PAGE:(page + 1) * PAGE]
         _clear()
-        head = "  选择曲目"
+        head = "  选择曲目  （名称同游戏）"
         if query:
             head += f"   搜索「{query}」"
         print("=" * 64)
         print(f"{head}    第 {page+1}/{pages} 页 · 共 {len(view)} 首")
         print("=" * 64)
-        for i, (mid, name, _d) in enumerate(chunk, 1):
+        for i, (mid, name, _d, _alias) in enumerate(chunk, 1):
             star = "    ←上次" if mid == last.get("music") else ""
             print(f"   [{i:>2}] {mid:>7}  {name}{star}")
         print("-" * 64)
@@ -358,7 +393,7 @@ def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
                 break
         query, page = raw, 0        # 当成关键字搜
 
-    music, name, diffs = song
+    music, name, diffs = song[0], song[1], song[2]
     default_diff = (last.get("difficulty")
                     if last.get("music") == music and last.get("difficulty") in diffs
                     else ("easy" if "easy" in diffs else (diffs[0] if diffs else "easy")))
@@ -433,9 +468,20 @@ def main() -> int:
     print(f"谱面 {name}（{music} {difficulty}）：{len(events)} 个落指事件，"
           f"第 1 个在 {first.time_ms/1000:.2f}s，最后一个在 {events[-1].time_ms/1000:.1f}s")
 
-    dev = AdbDevice(serial=cfg["device"].get("serial"),
-                    adb_path=cfg["device"].get("adb_path"))
-    info = dev.info()
+    try:
+        dev = AdbDevice(serial=cfg["device"].get("serial"),
+                        adb_path=cfg["device"].get("adb_path"))
+        info = dev.info()
+    except Exception as exc:  # noqa: BLE001
+        print(f"连不上手机：{exc}")
+        print("   按顺序检查这几项（大多数情况是手机端的事）：")
+        print("   1) 数据线插好（Windows 能看到「REDMI K90」这类设备名就算插好了）")
+        print("   2) 手机：设置 → 更多设置 → 开发者选项 → **USB 调试** 打开")
+        print("      （本来就开着的话，关掉再打开一次）")
+        print("   3) 下拉通知栏 → 点「USB 连接方式」→ 选「传输文件 (MTP)」")
+        print("   4) 手机上若弹出「允许 USB 调试吗？」，勾「始终允许」再点确定")
+        print("   5) 改完在命令行敲一次：adb devices —— 看到一串设备号就成了")
+        return 2
     panel_w, panel_h = info.width, info.height       # 自然方向（竖屏）
     screen_w, screen_h = info.height, info.width     # 游戏横屏逻辑尺寸
     stream_size = cfg["vision"].get("stream_size", "1280x592")
