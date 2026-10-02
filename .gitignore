@@ -5,3 +5,5 @@ work/last_choice.json
 debug/
 .venv/
 *.zip
+# 例外：封存包本体要入库（时间戳证明的对象就是它）
+!timestamp/*.zip
