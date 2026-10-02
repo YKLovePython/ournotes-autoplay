@@ -1,59 +1,54 @@
-# 时间戳存证 —— 验证方法
+# Timestamp proof / 时间戳存证
 
-> ⚠️ **这个文件夹里的 `OurNotes-Autoplay-20261003/` 是封包内容，已经参与哈希计算，不要再改它**。
-> 要加东西就加在这个文件夹（外层），或者另建文件夹。
+**English** · [中文](#中文)
 
-## 文件清单
+> **Status: complete.** The hash is now committed into **Bitcoin block 969627**
+> (block time 2026-10-02 19:37:33 UTC = 2026-10-03 03:37:33 Beijing; submitted 03:30,
+> mined 7 minutes later). Verified independently against the block header with
+> `ots_verify_independent.py`.
 
-| 文件 | 是什么 |
-| --- | --- |
-| `OurNotes-Autoplay-20261003.zip` | **被封存的原始包**（代码 + 文档，38 个文件 + 作者声明 + 包内哈希清单） |
-| `OurNotes-Autoplay-20261003.zip.ots` | **比特币时间戳证明**（OpenTimestamps） |
-| `OurNotes-Autoplay-20261003.zip.tsr` | **RFC 3161 可信时间戳**（FreeTSA 签发） |
-| `存档SHA256.txt` | zip 的 SHA-256 与大小 |
-| `时间戳说明_TSA.txt` | TSA 地址、状态、签发时间 |
-| `freetsa_cacert.pem` / `freetsa_tsa.crt` | FreeTSA 的根证书与 TSA 证书（校验 `.tsr` 时要配套） |
+This folder is a **public time commitment**. The implementation itself is *not*
+published — but the hash of the sealed source archive is, together with independent
+third-party timestamps that prove the archive already existed on **2026-10-03**.
 
-**zip 的 SHA-256：**
+That is the standard way to claim priority without publishing the code: anyone can later
+be shown the archive, and it either matches this hash or it does not.
+
 ```
-80109e206e2d2562bbea5443ea6307c114765c76d3dce334114827b85215b6af
-```
-
----
-
-## 1. 先验证"文件没被动过"
-
-```powershell
-certutil -hashfile OurNotes-Autoplay-20261003.zip SHA256
+Archive : OurNotes-Autoplay-20261003.zip   (149 KB, 40 files: source + docs, kept private)
+SHA-256 : 80109e206e2d2562bbea5443ea6307c114765c76d3dce334114827b85215b6af
 ```
 
-输出应等于上面那串哈希。相等 → 文件与存档时完全一致。
+## Three independent proofs
 
-（这是所有时间证明的前提：证明只对"这一串哈希"有效，所以 **zip 不要改**。）
+| Proof | File | What it is |
+| --- | --- | --- |
+| Bitcoin (OpenTimestamps) | `OurNotes-Autoplay-20261003.zip.ots` | the hash is committed into the Bitcoin blockchain via public calendars |
+| RFC 3161 timestamp | `OurNotes-Autoplay-20261003.zip.tsr` | issued by FreeTSA, `granted`, genTime **2026-10-02 19:30:36 UTC** (2026-10-03 03:30 Beijing) |
+| Source history | private repo commit history | commits dated from **2026-09-30** onward |
 
----
+`freetsa_cacert.pem` / `freetsa_tsa.crt` are the FreeTSA certificates needed to verify
+the `.tsr` token.
 
-## 2. 验证比特币时间戳（`.ots`）
+## How to verify
 
-**当晚生成的是"待确认"状态**，需要等 1~2 小时（日历把哈希写进比特币交易、交易被打包）。之后再执行：
+**1. Check what the timestamps are about**
 
-```powershell
-ots upgrade OurNotes-Autoplay-20261003.zip     # 把待确认升级为已锚定
-ots verify  OurNotes-Autoplay-20261003.zip     # 校验：会显示区块高度与区块时间
-ots info    OurNotes-Autoplay-20261003.zip.ots # 只看证明内容
+```bash
+sha256sum OurNotes-Autoplay-20261003.zip      # must equal the hash above
 ```
 
-不想装工具的话，把 **zip 和 `.ots` 两个文件**上传到 https://opentimestamps.org 也能在线校验。
+**2. Bitcoin proof**
 
-> `ots` 本机已装好（v0.7.2）。本机缺 OpenSSL 导致 `python-bitcoinlib` 导入失败的问题，已通过在
-> `bitcoin/core/key.py` 里加一段"找不到 OpenSSL 就退化成占位对象"的兜底修好——只影响密钥/钱包功能，
-> 存证、升级、校验都不受影响。
+```bash
+ots upgrade OurNotes-Autoplay-20261003.zip    # if still "pending"
+ots verify  OurNotes-Autoplay-20261003.zip    # prints the Bitcoin block height + time
+```
 
----
+No tools at hand? Upload the archive and the `.ots` file to https://opentimestamps.org —
+it verifies in the browser.
 
-## 3. 验证 RFC 3161 时间戳（`.tsr`）
-
-需要 openssl（本机没装；可从 https://slproweb.com/products/Win32OpenSSL.html 装，或用 Git Bash 自带版本）：
+**3. RFC 3161 token**
 
 ```bash
 openssl ts -verify -in OurNotes-Autoplay-20261003.zip.tsr \
@@ -61,31 +56,68 @@ openssl ts -verify -in OurNotes-Autoplay-20261003.zip.tsr \
                    -CAfile freetsa_cacert.pem -untrusted freetsa_tsa.crt
 ```
 
-看到 `Verification: OK` 即通过。也可以只做粗验：时间戳文件里应当**包含 zip 的 SHA-256 原文**
-（本机已比对，结果为 `True`）。
+`Verification: OK` means the token is genuine and was issued over exactly this archive.
 
-> FreeTSA 是免费的公共 TSA。若需要**法律效力更强**的签名时间戳，见下面「还可以加什么」。
+> The archive itself is kept private. To substantiate the claim, the author can release it
+> at any time; if its SHA-256 matches the value recorded here, the timestamps above apply
+> to it — no trust in the author or in GitHub is required, only in Bitcoin and in the TSA.
 
 ---
 
-## 4. 还可以加什么（按权威性）
+## 中文
 
-| 方式 | 说明 | 成本 |
+> **状态：已完成。** 该哈希已写入 **比特币区块 969627**
+> （区块时间 2026‑10‑02 19:37:33 UTC = 北京时间 2026‑10‑03 03:37:33；
+> 03:30 提交，7 分钟后被打包）。已用区块头独立验证通过：`ots_verify_independent.py`。
+
+这个目录是一份**公开的时间承诺**：**代码本体不公开**，公开的是封存包的哈希，以及能证明
+"这个哈希在 **2026‑10‑03** 就已经存在"的第三方时间戳。
+
+这是"不公开代码也能主张先后"的标准做法：将来任何时候把封存包拿出来，对得上哈希就成立，
+对不上就说明不是这份。
+
+```
+封存包 : OurNotes-Autoplay-20261003.zip   （149 KB，40 个文件：源码 + 文档，未公开）
+SHA-256: 80109e206e2d2562bbea5443ea6307c114765c76d3dce334114827b85215b6af
+```
+
+### 三重证据
+
+| 证据 | 文件 | 说明 |
 | --- | --- | --- |
-| **国内版权登记**（中国版权保护中心 / 各省版权局） | 拿到《作品登记证书》，是国内维权最常见、法院最认的形式 | 免费或几十元，周期 1~2 个月 |
-| **可信时间戳**（联合信任 tsa.cn 等） | 国内法院普遍认可的第三方时间戳服务，可对源代码/文档出证 | 按次收费，几分钟出证 |
-| **Zenodo DOI** | 把 GitHub release 同步到 Zenodo，获得一个学术界的唯一 DOI 与"发布日期"，第三方托管 | 免费 |
-| **Software Heritage** | 提交仓库归档，获得永久 SWHID 与归档时间 | 免费 |
-| **eIDAS 合格时间戳**（欧盟） | 欧盟法律意义上的合格电子时间戳 | 收费 |
+| 比特币（OpenTimestamps） | `OurNotes-Autoplay-20261003.zip.ots` | 哈希经公共日历写入比特币区块链 |
+| RFC 3161 可信时间戳 | `OurNotes-Autoplay-20261003.zip.tsr` | FreeTSA 签发，状态 granted，时间 **2026‑10‑02 19:30:36 UTC**（北京时间 10‑03 03:30） |
+| 提交历史 | 私有仓库 | 提交自 **2026‑09‑30** 起 |
 
-建议：**国内版权登记 + 可信时间戳**（法律用）＋ **本文件夹这套**（免费、可独立验证、随时可做）。
+`freetsa_cacert.pem` / `freetsa_tsa.crt` 是校验 `.tsr` 需要用到的 FreeTSA 证书。
 
----
+### 怎么验证
 
-## 5. 保存建议
+**① 确认存证对象**
 
-这套东西的价值在于**长期可验证**，所以要：
+```bash
+sha256sum OurNotes-Autoplay-20261003.zip     # 必须等于上面那串哈希
+```
 
-1. **三处存放**：本机、云盘（如网盘/OneDrive）、离线介质（U 盘/移动硬盘各一份）
-2. **zip 永远不要再改**；要出新版本就重新打包 + 重新做时间戳，旧包保持原样
-3. `.ots` / `.tsr` 必须与 zip **一起**保存——它们只对这一个哈希有效
+**② 比特币那条**
+
+```bash
+ots upgrade OurNotes-Autoplay-20261003.zip   # 若显示 pending，先升级
+ots verify  OurNotes-Autoplay-20261003.zip   # 打印出所在的比特币区块高度与时间
+```
+
+手上没工具也可以：把封存包和 `.ots` 两个文件传到 https://opentimestamps.org 在线验证。
+
+**③ 时间戳令牌**
+
+```bash
+openssl ts -verify -in OurNotes-Autoplay-20261003.zip.tsr \
+                   -data OurNotes-Autoplay-20261003.zip \
+                   -CAfile freetsa_cacert.pem -untrusted freetsa_tsa.crt
+```
+
+输出 `Verification: OK` 即通过。
+
+> 封存包由作者自己保管。需要主张时把它公开即可：只要它的 SHA‑256 与本目录记录的一致，
+> 上面这些时间戳就直接适用于它——**不需要信任作者本人，也不需要信任 GitHub**，
+> 只需要信任比特币和 TSA。

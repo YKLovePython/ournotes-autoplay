@@ -1,4 +1,10 @@
-文件: OurNotes-Autoplay-20261003.zip
-大小: 152949 字节
-SHA-256: 80109e206e2d2562bbea5443ea6307c114765c76d3dce334114827b85215b6af
-生成时间: 2026-10-03 03:28:13 +0800
+File    : OurNotes-Autoplay-20261003.zip
+Size    : 152945 bytes (149.36 KB)
+Files   : 40 (27 python modules + docs + statement + per-file hash list)
+SHA-256 : 80109e206e2d2562bbea5443ea6307c114765c76d3dce334114827b85215b6af
+Created : 2026-10-03 03:28 (UTC+8)
+Sealed  : 2026-10-03 03:30 (UTC+8)  Bitcoin (OpenTimestamps) + RFC 3161 (FreeTSA)
+Bitcoin : block 969627, block time 2026-10-02 19:37:33 UTC (2026-10-03 03:37:33 UTC+8)
+TSA     : FreeTSA, genTime 2026-10-02 19:30:36 UTC (2026-10-03 03:30:36 UTC+8)
+Status  : archive itself is NOT published (source stays private)
+Verify  : python ots_verify_independent.py OurNotes-Autoplay-20261003.zip OurNotes-Autoplay-20261003.zip.ots
