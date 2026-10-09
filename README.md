@@ -1,13 +1,19 @@
-# OurNotes Autoplay — 内部技术档案（私有）
+# BanG Dream! Our Notes — 人机协同自动演奏（完整源码）
 
-> 这个仓库是**私有**的，用于保存实现与时间证据。
-> 公开出去的是另一份「效果与思路」仓库，**不包含**这里的代码。
+> **你按第 1 个音符，脚本从第 2 个音符起把整首打完。**
+> 原厂 Android、**免 root**；通过 scrcpy-server 注册的**虚拟 HID 触摸屏**注入；
+> **谱面驱动**（画面只用来认确认页），支持长条**横移跟随**与头尾**轻扫**。
 
-**English abstract** — Private archive of a human-in-the-loop autoplay for *BanG Dream!
-Our Notes* on an unrooted Android phone: a player taps the first note, the tool takes over
-from the second using the game's own chart data. This repository holds the implementation,
-the measurements and the development timeline; it exists so the work has a dated,
-tamper-evident record.
+* 介绍页 / 技术思路：[bandori-ournotes-autoplay](https://github.com/YKLovePython/bandori-ournotes-autoplay)
+* 免环境 Windows 版：见本仓库 [Releases](../../releases)
+* 时间戳存证（比特币 + RFC 3161）：[`timestamp/`](timestamp/README.md)
+* 作者：B 站 **作业快没了** · 交流群 **933148159**
+
+**English** — Human-in-the-loop autoplay for *BanG Dream! Our Notes* on an unrooted
+Android phone. The player taps the first note; the tool takes over from the second using
+the game's own chart data. No root: touches go through a virtual HID touchscreen created
+via scrcpy-server's UHID support. Chart-driven (the screen is only used to recognise the
+band-confirm page), with continuous hold-bar following and head/tail flick gestures.
 
 ---
 
@@ -82,5 +88,5 @@ docs/04_时间线.md          开发时间线（时间证据）
 
 ## 授权
 
-保留所有权利（见 [LICENSE](LICENSE)）。**未授权转载或再分发**。
-仅供内部存档与时间证明使用。
+* **代码**：见 [LICENSE](LICENSE) —— 可以自由阅读、学习、自己跑；**转载、再分发或商用请先联系作者**。
+* **文档与截图**：CC BY‑NC‑SA 4.0（署名 · 非商用 · 相同方式共享）。
