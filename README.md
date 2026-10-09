@@ -4,10 +4,16 @@
 > 原厂 Android、**免 root**；通过 scrcpy-server 注册的**虚拟 HID 触摸屏**注入；
 > **谱面驱动**（画面只用来认确认页），支持长条**横移跟随**与头尾**轻扫**。
 
+> **适配范围：Windows 电脑 + 安卓手机（已实测）。** macOS / Linux / iOS 设备不支持，也未做验证。
+
 * 介绍页 / 技术思路：[bandori-ournotes-autoplay](https://github.com/YKLovePython/bandori-ournotes-autoplay)
-* 免环境 Windows 版：见本仓库 [Releases](../../releases)
+* 免环境 Windows 版（解压双击即用）：见本仓库 [Releases](../../releases)
 * 时间戳存证（比特币 + RFC 3161）：[`timestamp/`](timestamp/README.md)
 * 作者：B 站 **作业快没了** · 交流群 **933148159**
+
+**遇到问题先自检**：便携版里双击 `一键自检.bat`（或命令行跑 `人手起手.exe --check`）。
+它会依次检查依赖库、程序文件、谱面数据、adb、手机连接，以及**触控注入通道能不能建起来**，
+结果保存到 `logs\自检_日期_时间.txt`。把这个文件发出来，环境问题基本一次定位。
 
 **English** — Human-in-the-loop autoplay for *BanG Dream! Our Notes* on an unrooted
 Android phone. The player taps the first note; the tool takes over from the second using
