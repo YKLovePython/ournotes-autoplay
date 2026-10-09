@@ -23,8 +23,16 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+def _app_root() -> Path:
+    """程序根目录：打包成 exe 后是 exe 所在目录，源码运行时是仓库根。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+ROOT = _app_root()
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from bandori_autoplay.adb import AdbDevice, AdbError  # noqa: E402
 from bandori_autoplay.capture import ScreenStream  # noqa: E402
@@ -48,6 +56,23 @@ ARM_FLOOR_S = 4.5
 HANDOVER_LEAD_S = 0.15
 # 量不到往返延迟时用的缺省值（实测量级 20~50 ms）
 DEFAULT_PATH_LATENCY = 0.035
+
+
+def _setup_console() -> None:
+    """双击 exe 直接运行时，把控制台切到 UTF-8，中文才不乱码。"""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:  # noqa: BLE001
+        pass
+    for stream in (sys.stdout, sys.stdin):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
 
 # ---- 手势参数 ----
 TAP_MS = 0.040           # 点按按住多久
@@ -371,7 +396,8 @@ def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
             star = "    ←上次" if mid == last.get("music") else ""
             print(f"   [{i:>2}] {mid:>7}  {name}{star}")
         print("-" * 64)
-        print(f"   序号选曲 · 关键字搜索 · n 下页 · p 上页 · 回车 = {fallback[1]}")
+        print(f"   序号选曲 · 关键字搜索 · n 下页 · p 上页 · c 环境自检"
+              f" · 回车 = {fallback[1]}")
         raw = _ask("\n  选曲 > ")
         if raw is None or raw == "":
             song = fallback
@@ -382,6 +408,8 @@ def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
             continue
         if low in ("q", "quit", "exit"):
             return None, None, None
+        if low in ("c", "check", "自检", "测试"):
+            return "check", None, None          # 主程序会转去跑环境自检
         if raw.isdigit():
             n = int(raw)
             if 1 <= n <= len(chunk):
@@ -429,8 +457,13 @@ def main() -> int:
     ap.add_argument("--no-calibrate", action="store_true",
                     help="跳过加载页里的往返延迟标定")
     ap.add_argument("--start-button", default="", help="覆盖 LIVE START 坐标，如 2284,1037")
+    ap.add_argument("--check", action="store_true",
+                    help="只做环境自检（依赖/数据/adb/手机/注入通道），不碰手机")
+    ap.add_argument("--check-quick", action="store_true",
+                    help="自检时跳过“建虚拟触摸屏”那一步")
     args = ap.parse_args()
 
+    _setup_console()
     logdir = ROOT / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
     logpath = logdir / time.strftime("human_play_%m%d_%H%M%S.log")
@@ -439,6 +472,37 @@ def main() -> int:
     print(f"日志 → {logpath}")
 
     cfg = load_config()
+    # 便携版：配置里的相对路径一律按「程序目录」解析，拷到别的电脑也能用
+    adb_cfg = str(cfg.get("device", {}).get("adb_path") or "").strip()
+    adb_path = Path(adb_cfg) if adb_cfg else None
+    if adb_path is not None and not adb_path.is_absolute():
+        adb_path = ROOT / adb_path
+    if adb_path is not None and adb_path.exists():
+        cfg["device"]["adb_path"] = str(adb_path)
+        print(f"adb: {adb_path}")
+    else:
+        cfg["device"]["adb_path"] = None      # 交给 adb.py 自动找（含程序自带的 platform-tools）
+    jar_cfg = str(cfg.get("touch", {}).get("scrcpy_jar") or "").strip()
+    if jar_cfg:
+        jar_path = Path(jar_cfg)
+        if not jar_path.is_absolute():
+            jar_path = ROOT / jar_path
+        cfg["touch"]["scrcpy_jar"] = str(jar_path)
+
+    if args.check:
+        from bandori_autoplay.selfcheck import run_checks
+
+        return 1 if run_checks(cfg, ROOT, deep=not args.check_quick) else 0
+
+    from bandori_autoplay.selfcheck import quick_summary
+
+    problems = quick_summary(cfg, ROOT, log=print)
+    if problems:
+        print("  ⚠ 环境自检发现问题：")
+        for p in problems:
+            print("    · " + p)
+        print("    （可双击「一键自检.bat」生成完整报告发给作者）")
+
     chart_dir = ROOT / cfg.get("chartdb", {}).get("dir", "work/chartdb/out")
 
     name = ""
@@ -448,6 +512,10 @@ def main() -> int:
             print(f"读不到谱面索引：{chart_dir / 'index.json'}")
             return 2
         picked = pick_song(catalog)
+        if picked[0] == "check":
+            from bandori_autoplay.selfcheck import run_checks
+
+            return 1 if run_checks(cfg, ROOT, deep=not args.check_quick) else 0
         if picked[0] is None:
             print("没选歌，结束")
             return 0
