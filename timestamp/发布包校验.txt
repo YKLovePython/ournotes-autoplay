@@ -1,0 +1,27 @@
+谛听 · BanG Dream! Our Notes 自动演奏 —— v2.0.0 发布包校验
+Release checksums — Diting, Our Notes autoplay v2.0.0
+============================================================
+
+打包时间（北京时间）：2026-10-16
+构建环境：Windows 11 / Python 3.11.9 / PyInstaller 6.14.2 / numpy + opencv-python + PyYAML
+目标平台：Windows 10/11 x64（便携版自带运行库，目标机器无需安装 Python）
+
+【1】发布用便携包（GitHub Release 的附件）
+    文件      Diting-OurNotes-Autoplay-v2.0.0-win64.zip
+    大小      67.46 MB（70,738,224 字节；解压后 209.9 MB / 429 个文件）
+    解压后     一个 Diting-OurNotes-Autoplay-v2.0.0\ 文件夹，里面：
+              谛听.exe + _internal\ + config\ + geometry\ + work\ + platform-tools\
+    SHA-256   4220681dd8f44072d791e3f9bd1d2dbdd533cc95d94c6ead2e9ecb7adfb49311
+
+【2】源码与文档归档（本目录里那份，时间戳证明的对象）
+    文件      Diting-OurNotes-Autoplay-v2.0.0-src.zip
+    大小      1.90 MB（1,995,182 字节）
+    内容      仓库快照：src/ + tools/ + config/ + geometry/ + docs/ + samples/ + README + LICENSE
+    SHA-256   23b42d7496fc57081e8774196efe7720c7361dc14d7b9ef7bba3660674a880f7
+
+【怎么核对】
+    certutil -hashfile Diting-OurNotes-Autoplay-v2.0.0-win64.zip SHA256
+    输出（去掉空格、转小写）应等于上面那串。相等 → 文件与存档时完全一致。
+
+    这一步是全部时间证明的前提：时间戳只对"这一串哈希"有效，所以两个 zip 都不要再改；
+    要出新版本就重新打包 + 重新做时间戳，旧包保持原样。

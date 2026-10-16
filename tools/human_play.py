@@ -1,17 +1,12 @@
-"""你按第 1 个音符，脚本从第 2 个音符接着打。
+"""谛听：你按第 1 个音符，脚本从第 2 个音符起把整首打完。
 
-    python tools/human_play.py              # 选歌 → 运行
-    python tools/human_play.py --observe    # 只看不动手（先拿它验证一次）
+双击就是打歌；启动时会自己先跑一遍只读自检（不碰手机画面）。
+把装有整屏截图的文件夹**拖到 exe 上**，就是核对几何。
 
-就这么几步，没有别的机关：
-
-1. 选歌（回车 = 影色舞 EASY）；
-2. 脚本替你点 LIVE START，趁加载页自动量一次往返延迟；
-3. 演奏画面出来后，你**按第 1 个音符**；
-4. 脚本拿你那一下当基准，**从第 2 个音符开始接管**，你松手看它打完。
-
-基准来自你自己的落指：脚本取的是那条触摸事件的**内核时间戳**，所以 adb 读得
-慢只会让我们晚点开打，不会让落点偏。
+    python tools/human_play.py                 # 选歌 → 开演
+    python tools/human_play.py --check         # 完整自检（含试建虚拟触摸屏）
+    python tools/human_play.py --music 100004 --difficulty easy
+    python tools/human_play.py <截图文件夹>     # 核对几何
 """
 
 from __future__ import annotations
@@ -23,42 +18,30 @@ import sys
 import time
 from pathlib import Path
 
-def _app_root() -> Path:
-    """程序根目录：打包成 exe 后是 exe 所在目录，源码运行时是仓库根。"""
+
+def app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 
 
-ROOT = _app_root()
+ROOT = app_root()
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
 
-from bandori_autoplay.adb import AdbDevice, AdbError  # noqa: E402
-from bandori_autoplay.capture import ScreenStream  # noqa: E402
-from bandori_autoplay.chartdb import FieldGeometry, load_events  # noqa: E402
-from bandori_autoplay.config import load_config  # noqa: E402
-from bandori_autoplay.human_anchor import (  # noqa: E402
-    HumanAnchor,
-    find_uhid_node,
-    match_tap,
-    measure_path_latency,
+from bandori_autoplay import (  # noqa: E402
+    chartdb, geometry, liveui, schedule, screen, selfcheck, verify,
 )
-from bandori_autoplay.liveui import wait_confirm_page  # noqa: E402
-from bandori_autoplay.performer import sleep_until  # noqa: E402
+from bandori_autoplay.adb import AdbDevice  # noqa: E402
+from bandori_autoplay.anchor import TouchClock, find_uhid_node  # noqa: E402
+from bandori_autoplay.config import find_resource, load as load_config, resolve_paths  # noqa: E402
+from bandori_autoplay.latency import measure_roundtrip  # noqa: E402
 from bandori_autoplay.touch import make_touch  # noqa: E402
-from bandori_autoplay.touchlog import find_touch_node  # noqa: E402
+from bandori_autoplay.touchlog import find_touch_device  # noqa: E402
+
+STEP = "=" * 62
 
 
-# 加载页大概要 9~10 秒；这个下限只是挡掉「还没进演奏画面就误触」
-ARM_FLOOR_S = 4.5
-# 接管最小提前量：比这更近的音符来不及发，直接跳过
-HANDOVER_LEAD_S = 0.15
-# 量不到往返延迟时用的缺省值（实测量级 20~50 ms）
-DEFAULT_PATH_LATENCY = 0.035
-
-
-def _setup_console() -> None:
+def setup_console() -> None:
     """双击 exe 直接运行时，把控制台切到 UTF-8，中文才不乱码。"""
     try:
         if os.name == "nt":
@@ -73,21 +56,6 @@ def _setup_console() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-
-# ---- 手势参数 ----
-TAP_MS = 0.040           # 点按按住多久
-HOLD_TAIL_PAD_S = 0.060  # 长条到点后再多按 60ms 才松手（松早了尾判容易掉）
-FLICK_LEAD_S = 0.020     # 轻扫：提前按下
-FLICK_SPAN_S = 0.050     # 轻扫划动的耗时
-FLICK_DIST = 120         # 轻扫距离（设备像素）
-SLOTS = 9                # 可用的手指编号
-RELEASE_GAP_S = 0.030    # 松开后隔这么久才允许这根手指接下一个音符
-# 长条跟随的节奏。实测横移长条中位 1258 px/s、90 分位 4346 px/s，
-# 按「每个谱面节点动一次」（约 157ms）单步位移中位 197px——和音符条容差同量级，
-# 手指有一半时间在条外，这就是"有概率 miss"的来源。
-# 改成**按位移采样**：走够 MOVE_TARGET_PX 才发一次，同一根手指最快 MOVE_MIN_S 一次。
-MOVE_TARGET_PX = 50      # 每次划动至少走这么多像素
-MOVE_MIN_S = 0.025       # 同一根手指最快 40Hz
 
 
 class _Tee:
@@ -112,7 +80,6 @@ class _Tee:
                 pass
 
     def isatty(self) -> bool:
-        """代理给真正的流——选歌界面靠它决定要不要清屏。"""
         for st in self.streams:
             try:
                 if st.isatty():
@@ -130,222 +97,26 @@ class _Tee:
         raise OSError("_Tee 没有可用的 fileno")
 
 
-def _flick_vector(direction: str, dist: int = FLICK_DIST) -> tuple[int, int]:
-    """轻扫方向 -> 屏幕位移。谱面里只有 up / left / right（没有 down）。"""
-    d = (direction or "up").lower()
-    if d == "left":
-        return -dist, 0
-    if d == "right":
-        return dist, 0
-    return 0, -dist          # up 是默认，也是谱面里最多的
-
-
-def _resample_path(path, t0: float, to_px, t_from: float, t_to: float,
-                   target_px: float = MOVE_TARGET_PX, min_s: float = MOVE_MIN_S):
-    """把长条轨迹重采样成 ``[(绝对时刻, 屏幕 x), ...]``，让手指贴着条子连续走。
-
-    谱面节点大约 77~157ms 一个，照抄就是"一格一跳"（单步中位 197px，条子容差
-    同量级，所以有概率掉）。这里按**位移**采样：走够 ``target_px`` 就发一次，
-    同时同一根手指最快 ``min_s`` 一次——慢条子不会被无谓地喂一堆动作，
-    快条子也不会跳步。
-    """
-    pts = [(t0 + t_ms / 1000.0, float(to_px(c))) for t_ms, c in (path or ())]
-    if len(pts) < 2 or t_to <= t_from:
-        return []
-    out: list[tuple[float, float]] = []
-    last_t = last_px = None
-    for i in range(1, len(pts)):
-        ta, pa = pts[i - 1]
-        tb, pb = pts[i]
-        if tb <= ta:
-            continue
-        n = max(1, int(abs(pb - pa) / (target_px / 2.0) + 0.999))
-        for k in range(1, n + 1):
-            r = k / n
-            t = ta + (tb - ta) * r
-            px = pa + (pb - pa) * r
-            if t < t_from - 1e-9 or t > t_to + 1e-9:
-                continue
-            if last_t is not None and (t - last_t) < min_s:
-                continue
-            if last_px is not None and abs(px - last_px) < target_px:
-                continue
-            out.append((t, px))
-            last_t, last_px = t, px
-    return out
-
-
-def build_schedule(events, t0: float, geom: FieldGeometry, start_index: int,
-                   tap_ms: float = TAP_MS, hold_pad_s: float = HOLD_TAIL_PAD_S):
-    """把谱面事件摊成动作表（down / move / up），按时间排序。
-
-    三类手势：
-      * **tap**   —— 按下、按 40ms、抬起
-      * **long**  —— 按住，并**沿着节点轨迹移动**，到点后再多按一会儿才松手
-      * **flick** —— 按下、朝谱面给的方向划出去、抬起
-
-    同一时刻的动作按「先按/移动、后松开」排，免得游戏把松手和新按下并成一拍。
-    """
-    acts: list[tuple[float, str, int, int, int]] = []
-    y = geom.device_judge_y
-    busy = [0.0] * (SLOTS + 1)      # busy[s] = 这根手指到什么时候才空出来
-
-    def take_slot(t: float) -> int:
-        free = [s for s in range(1, SLOTS + 1) if busy[s] <= t]
-        if free:
-            return min(free)
-        return min(range(1, SLOTS + 1), key=lambda s: busy[s])
-
-    for i in range(start_index, len(events)):
-        e = events[i]
-        t_hit = t0 + e.time_ms / 1000.0
-        x = geom.device_x(e.center)
-
-        # ---- 轻扫 ----
-        if e.kind == "flick" and not e.is_hold:
-            dx, dy = _flick_vector(e.direction)
-            t_down = t_hit - FLICK_LEAD_S
-            slot = take_slot(t_down)
-            t_up = t_hit + FLICK_SPAN_S
-            busy[slot] = t_up + RELEASE_GAP_S
-            acts.append((t_down, "down", slot, x, y))
-            acts.append((t_hit, "move", slot, x + dx // 2, y + dy // 2))
-            acts.append((t_hit + FLICK_SPAN_S / 2, "move", slot, x + dx, y + dy))
-            acts.append((t_up, "up", slot, x + dx, y + dy))
-            continue
-
-        # ---- 长条：连续跟着轨迹走；头/尾可能是轻扫 ----
-        if e.is_hold:
-            head_f = getattr(e, "head_flick", "") or (e.direction if e.kind == "flick" else "")
-            tail_f = getattr(e, "tail_flick", "")
-            t_end = t0 + e.end_ms / 1000.0
-            t_down = t_hit - (FLICK_LEAD_S if head_f else 0.0)
-            follow_to = t_end - (FLICK_SPAN_S if tail_f else 0.0)
-            t_up = t_end + (FLICK_SPAN_S + 0.02 if tail_f else hold_pad_s)
-            slot = take_slot(t_down)
-            busy[slot] = t_up + RELEASE_GAP_S
-            fx, fy = x, y
-            if head_f:
-                dx, dy = _flick_vector(head_f)
-                acts.append((t_down, "down", slot, fx, fy))
-                acts.append((t_hit, "move", slot, fx + dx // 2, fy + dy // 2))
-                acts.append((t_hit + FLICK_SPAN_S / 2, "move", slot, fx + dx, fy + dy))
-                acts.append((t_hit + FLICK_SPAN_S, "move", slot, x, y))
-                fx, fy = x, y
-            else:
-                acts.append((t_down, "down", slot, fx, fy))
-            start_follow = t_hit + (FLICK_SPAN_S if head_f else 0.0)
-            for t_abs, px in _resample_path(e.path, t0, geom.device_x,
-                                            start_follow, follow_to):
-                nx = int(round(px))
-                if nx == fx:        # 位置没变就不发（原地不动的长条一个划动都不发）
-                    continue
-                acts.append((t_abs, "move", slot, nx, fy))
-                fx = nx
-            if tail_f:
-                # 先确保手指已经在条子尾巴上，再划出去
-                tail_px = int(round(geom.device_x(e.path[-1][1] if e.path else e.center)))
-                if tail_px != fx:
-                    acts.append((follow_to, "move", slot, tail_px, fy))
-                    fx = tail_px
-                dx, dy = _flick_vector(tail_f)
-                acts.append((t_end, "move", slot, fx + dx // 2, fy + dy // 2))
-                acts.append((t_end + FLICK_SPAN_S / 2, "move", slot, fx + dx, fy + dy))
-                fx, fy = fx + dx, fy + dy
-            acts.append((t_up, "up", slot, fx, fy))
-            continue
-
-        # ---- 普通点击 ----
-        slot = take_slot(t_hit)
-        t_up = t_hit + tap_ms
-        busy[slot] = t_up + RELEASE_GAP_S
-        acts.append((t_hit, "down", slot, x, y))
-        acts.append((t_up, "up", slot, x, y))
-
-    acts.sort(key=lambda a: (a[0], 1 if a[1] == "up" else 0))
-    return acts
-
-
-# ------------------------------------------------------------------ 选歌
-def song_catalog(chart_dir: Path) -> list[tuple[int, str, list[str], str]]:
-    """曲目列表 —— **名称与游戏内一致**。
-
-    游戏里显示的是**日文原名**（不做翻译），所以这里用 ``MasterText._japanese``；
-    其它语言只留作搜索别名（想用简中名找也行）。顺序仍按曲目号。
-
-    返回 ``(曲目号, 日文名, 难度列表, 搜索别名)``。
-    """
-    index = chart_dir / "index.json"
-    if not index.exists():
-        return []
-    charts = json.loads(index.read_text(encoding="utf-8")).get("charts", [])
-    by_music: dict[int, set[str]] = {}
-    for c in charts:
-        by_music.setdefault(int(c["musicId"]), set()).add(str(c["difficulty"]))
-
-    titles: dict[str, dict] = {}
-    text = ROOT / "work" / "master" / "MasterText.json"
-    if text.exists():
-        for row in json.loads(text.read_text(encoding="utf-8"))["_allData"]:
-            titles[row["_id"]] = row
-    music: dict[int, dict] = {}
-    mfile = ROOT / "work" / "master" / "MasterLiveMusic.json"
-    if mfile.exists():
-        for row in json.loads(mfile.read_text(encoding="utf-8"))["_allData"]:
-            music[int(row["_id"])] = row
-
-    order = ["easy", "normal", "hard", "expert"]
-    now = time.time()
-    entries = []
-    for mid in sorted(by_music):
-        row = music.get(mid, {})
-        t = (titles.get(str(row.get("_titleTextID") or ""))
-             or titles.get(f"Music_Tilte_{mid}") or titles.get(f"Music_Title_{mid}") or {})
-        # 游戏里显示的是日文原名；其它语言只用来做搜索别名
-        name = (t.get("_japanese") or t.get("_traditionalChinese")
-                or t.get("_simplifiedChinese") or t.get("_english") or "")
-        alias = " ".join(str(t.get(k) or "") for k in
-                         ("_simplifiedChinese", "_traditionalChinese", "_japanese", "_english"))
-        note = ""
-        start = _parse_start(row.get("_startAt"))
-        if start and start > now:
-            note = time.strftime("  预载 %m-%d", time.localtime(start))
-        diffs = [d for d in order if d in by_music[mid]]
-        entries.append((mid, (name or f"(未命名 {mid})") + note, diffs, alias))
-    return entries
-
-
-def _parse_start(value) -> float | None:
-    """把 master 里的 ``_startAt`` 解析成时间戳（格式是 ``2026/10/08 21:00:00``）。"""
-    s = str(value or "").strip()
-    if not s:
-        return None
-    for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y-%m-%d"):
-        try:
-            return time.mktime(time.strptime(s, fmt))
-        except ValueError:
-            continue
-    return None
-
-
-PAGE = 12
-LAST_CHOICE = ROOT / "work" / "last_choice.json"
-
-
-def _clear() -> None:
-    if sys.stdout.isatty():
-        os.system("cls" if os.name == "nt" else "clear")
-    else:
-        print()
+def sleep_until(deadline: float, spin: float = 0.0015) -> float:
+    """等到 ``perf_counter() >= deadline``，返回迟到量（秒）。"""
+    while True:
+        left = deadline - time.perf_counter()
+        if left <= 0:
+            return -left
+        if left > spin:
+            time.sleep(left - spin)
 
 
 def _ask(prompt: str):
-    """问一句；要是没有输入（管道/后台跑）就返回 None。"""
     try:
         return input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
+
+
+LAST_CHOICE = ROOT / "work" / "last_choice.json"
+PAGE = 12
 
 
 def _load_last() -> dict:
@@ -364,52 +135,64 @@ def _save_last(music: int, difficulty: str) -> None:
         pass
 
 
-def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
-    """选曲界面：分页列表 + 关键字搜索 + 上次记忆。
+def song_catalog(chart_dir: Path, master_dir: Path):
+    """可选曲目列表：``[(曲目号, 名字, [难度...]), ...]``（名字同游戏）。"""
+    index = chart_dir / "index.json"
+    if not index.exists():
+        return []
+    charts = json.loads(index.read_text(encoding="utf-8")).get("charts", [])
+    by_music: dict[int, set[str]] = {}
+    for c in charts:
+        by_music.setdefault(int(c["musicId"]), set()).add(str(c["difficulty"]))
+    titles = chartdb.load_title_map(master_dir)
+    order = ["easy", "normal", "hard", "expert"]
+    out = []
+    for mid in sorted(by_music):
+        diffs = [d for d in order if d in by_music[mid]]
+        out.append((mid, titles.get(mid) or f"(未命名 {mid})", diffs))
+    return out
 
-    想最快开跑就一路回车——回车 = 上次打的那首（第一次是影色舞 EASY）。
-    """
+
+def pick_song(catalog, cfg: dict):
+    """选曲 + 选难度。回车一路走 = 上次那首 / EASY；c = 完整自检。"""
     last = _load_last()
     fallback = (next((s for s in catalog if s[0] == last.get("music")), None)
-                or next((s for s in catalog if s[0] == 100004), None)
-                or catalog[0])
+                or next((s for s in catalog if s[0] == 100004), None) or catalog[0])
     page, query = 0, ""
     while True:
         q = query.lower()
-        view = ([s for s in catalog if q in s[1].lower() or q in s[3].lower()]
-                if query else list(catalog))
+        view = [s for s in catalog if q in s[1].lower()] if query else list(catalog)
         if query and not view:
-            print(f"    没有匹配「{query}」的曲目，换一个词")
+            print(f"    没有匹配「{query}」的曲目")
             query = ""
             continue
         pages = max(1, (len(view) + PAGE - 1) // PAGE)
         page = max(0, min(page, pages - 1))
         chunk = view[page * PAGE:(page + 1) * PAGE]
-        _clear()
-        head = "  选择曲目  （名称同游戏）"
-        if query:
-            head += f"   搜索「{query}」"
-        print("=" * 64)
-        print(f"{head}    第 {page+1}/{pages} 页 · 共 {len(view)} 首")
-        print("=" * 64)
-        for i, (mid, name, _d, _alias) in enumerate(chunk, 1):
+        print(STEP)
+        print(f"  选择曲目{('   搜索「' + query + '」') if query else ''}"
+              f"    第 {page + 1}/{pages} 页 · 共 {len(view)} 首")
+        print(STEP)
+        for i, (mid, name, _d) in enumerate(chunk, 1):
             star = "    ←上次" if mid == last.get("music") else ""
             print(f"   [{i:>2}] {mid:>7}  {name}{star}")
-        print("-" * 64)
-        print(f"   序号选曲 · 关键字搜索 · n 下页 · p 上页 · c 环境自检"
-              f" · 回车 = {fallback[1]}")
+        print("-" * 62)
+        print(f"   序号选曲 · 关键字搜索 · n 下页 · p 上页 · c 自检 · 回车 = {fallback[1]}")
         raw = _ask("\n  选曲 > ")
         if raw is None or raw == "":
             song = fallback
             break
         low = raw.lower()
-        if low in ("n", "p"):
-            page += 1 if low == "n" else -1
+        if low == "n":
+            page += 1
             continue
+        if low == "p":
+            page -= 1
+            continue
+        if low in ("c", "check"):
+            return ("check", None, None)
         if low in ("q", "quit", "exit"):
-            return None, None, None
-        if low in ("c", "check", "自检", "测试"):
-            return "check", None, None          # 主程序会转去跑环境自检
+            return None
         if raw.isdigit():
             n = int(raw)
             if 1 <= n <= len(chunk):
@@ -419,23 +202,19 @@ def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
             if exact:
                 song = exact
                 break
-        query, page = raw, 0        # 当成关键字搜
+        query, page = raw, 0
 
-    music, name, diffs = song[0], song[1], song[2]
-    default_diff = (last.get("difficulty")
-                    if last.get("music") == music and last.get("difficulty") in diffs
-                    else ("easy" if "easy" in diffs else (diffs[0] if diffs else "easy")))
-    _clear()
-    print("=" * 64)
+    music, name, diffs = song
+    default = (last.get("difficulty") if last.get("music") == music
+               and last.get("difficulty") in diffs
+               else ("easy" if "easy" in diffs else diffs[0]))
+    print(STEP)
     print(f"  选择难度    {name}（{music}）")
-    print("=" * 64)
+    print(STEP)
     for i, d in enumerate(diffs, 1):
-        star = "    ←上次" if d == default_diff else ""
-        print(f"   [{i}] {d}{star}")
-    print("-" * 64)
-    print(f"   序号或难度名 · 回车 = {default_diff}")
-    raw = _ask("\n  难度 > ")
-    difficulty = default_diff
+        print(f"   [{i}] {d}" + ("    ←上次" if d == default else ""))
+    raw = _ask(f"\n  难度（回车 = {default}）> ")
+    difficulty = default
     if raw:
         low = raw.lower()
         if low.isdigit() and 1 <= int(low) <= len(diffs):
@@ -446,95 +225,86 @@ def pick_song(catalog: list[tuple[int, str, list[str]]], log=print):
     return music, difficulty, name
 
 
+def _banner() -> None:
+    print(STEP)
+    print("  谛听   —— 你按第 1 个音符，脚本从第 2 个音符起把整首打完")
+    print(STEP)
+    print("  1) 手机：进游戏 → 选好歌和难度 → 停在「乐队确认」页（右下角有 LIVE START）")
+    print("  2) 电脑：这里回车选歌、再回车选难度")
+    print("  3) 演奏画面一出来，按第 1 个音符，按完松手")
+    print()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("target", nargs="*", default=None,
+                    help="把一个截图文件夹（或几张图）拖进来 = 核对几何")
     ap.add_argument("--music", type=int, default=None, help="曲目号（不给就进选歌）")
     ap.add_argument("--difficulty", default=None, help="easy/normal/hard/expert")
-    ap.add_argument("--offset-ms", type=float, default=0.0,
-                    help="整体微调（正=提前，负=延后）")
-    ap.add_argument("--observe", action="store_true",
-                    help="只观察不注入：脚本一下都不碰手机")
-    ap.add_argument("--no-calibrate", action="store_true",
-                    help="跳过加载页里的往返延迟标定")
-    ap.add_argument("--start-button", default="", help="覆盖 LIVE START 坐标，如 2284,1037")
-    ap.add_argument("--check", action="store_true",
-                    help="只做环境自检（依赖/数据/adb/手机/注入通道），不碰手机")
-    ap.add_argument("--check-quick", action="store_true",
-                    help="自检时跳过“建虚拟触摸屏”那一步")
+    ap.add_argument("--offset-ms", type=float, default=None,
+                    help="整体微调（正 = 提前）；不给就用配置里的值")
+    ap.add_argument("--no-calibrate", action="store_true", help="跳过加载页的往返延迟标定")
+    ap.add_argument("--check", action="store_true", help="完整自检后就退出")
     args = ap.parse_args()
 
-    _setup_console()
-    logdir = ROOT / "logs"
+    setup_console()
+    cfg = resolve_paths(load_config(), ROOT)
+
+    # 拖一个文件夹进来 = 核对几何
+    if args.target:
+        return verify.main(list(args.target))
+
+    logdir = Path(cfg["paths"]["logs"])
     logdir.mkdir(parents=True, exist_ok=True)
     logpath = logdir / time.strftime("human_play_%m%d_%H%M%S.log")
     logfile = open(logpath, "w", encoding="utf-8", buffering=1)   # 行缓冲，被中断也留得下
     sys.stdout = _Tee(sys.__stdout__, logfile)
-    print(f"日志 → {logpath}")
-
-    cfg = load_config()
-    # 便携版：配置里的相对路径一律按「程序目录」解析，拷到别的电脑也能用
-    adb_cfg = str(cfg.get("device", {}).get("adb_path") or "").strip()
-    adb_path = Path(adb_cfg) if adb_cfg else None
-    if adb_path is not None and not adb_path.is_absolute():
-        adb_path = ROOT / adb_path
-    if adb_path is not None and adb_path.exists():
-        cfg["device"]["adb_path"] = str(adb_path)
-        print(f"adb: {adb_path}")
-    else:
-        cfg["device"]["adb_path"] = None      # 交给 adb.py 自动找（含程序自带的 platform-tools）
-    jar_cfg = str(cfg.get("touch", {}).get("scrcpy_jar") or "").strip()
-    if jar_cfg:
-        jar_path = Path(jar_cfg)
-        if not jar_path.is_absolute():
-            jar_path = ROOT / jar_path
-        cfg["touch"]["scrcpy_jar"] = str(jar_path)
 
     if args.check:
-        from bandori_autoplay.selfcheck import run_checks
+        return selfcheck.deep(cfg, ROOT, log=print)
 
-        return 1 if run_checks(cfg, ROOT, deep=not args.check_quick) else 0
-
-    from bandori_autoplay.selfcheck import quick_summary
-
-    problems = quick_summary(cfg, ROOT, log=print)
+    _banner()
+    problems = selfcheck.quick(cfg, log=print)
     if problems:
-        print("  ⚠ 环境自检发现问题：")
+        print()
+        print("  ⚠ 自检没过，先解决上面那些再开演：")
         for p in problems:
             print("    · " + p)
-        print("    （可双击「一键自检.bat」生成完整报告发给作者）")
+        return 2
+    print()
 
-    chart_dir = ROOT / cfg.get("chartdb", {}).get("dir", "work/chartdb/out")
-
-    name = ""
-    if args.music is None:
-        catalog = song_catalog(chart_dir)
-        if not catalog:
-            print(f"读不到谱面索引：{chart_dir / 'index.json'}")
-            return 2
-        picked = pick_song(catalog)
-        if picked[0] == "check":
-            from bandori_autoplay.selfcheck import run_checks
-
-            return 1 if run_checks(cfg, ROOT, deep=not args.check_quick) else 0
-        if picked[0] is None:
-            print("没选歌，结束")
-            return 0
-        music, difficulty, name = picked
-    else:
-        music = args.music
-        difficulty = args.difficulty or "easy"
+    chart_dir = Path(cfg["paths"]["chartdb"])
+    while True:
+        if args.music is None:
+            catalog = song_catalog(chart_dir, Path(cfg["paths"]["master"]))
+            if not catalog:
+                print(f"读不到谱面索引：{chart_dir / 'index.json'}")
+                return 2
+            picked = pick_song(catalog, cfg)
+            if picked is None:
+                print("没选歌，结束")
+                return 0
+            if picked[0] == "check":
+                print()
+                selfcheck.deep(cfg, ROOT, log=print)
+                print()
+                continue
+            music, difficulty, name = picked
+        else:
+            music = args.music
+            difficulty = args.difficulty or "easy"
+            name = ""
+        break
 
     chart = chart_dir / "charts" / f"{music:06d}" / f"{difficulty}.json"
     if not chart.exists():
         print(f"没有这张谱面：{chart}")
         return 2
-    events = load_events(chart)
+    events = chartdb.load_events(chart)
     if not events:
         print("谱面里没有落指事件")
         return 2
     first = events[0]
-    print(f"谱面 {name}（{music} {difficulty}）：{len(events)} 个落指事件，"
-          f"第 1 个在 {first.time_ms/1000:.2f}s，最后一个在 {events[-1].time_ms/1000:.1f}s")
 
     try:
         dev = AdbDevice(serial=cfg["device"].get("serial"),
@@ -542,129 +312,118 @@ def main() -> int:
         info = dev.info()
     except Exception as exc:  # noqa: BLE001
         print(f"连不上手机：{exc}")
-        print("   按顺序检查这几项（大多数情况是手机端的事）：")
-        print("   1) 数据线插好（Windows 能看到「REDMI K90」这类设备名就算插好了）")
-        print("   2) 手机：设置 → 更多设置 → 开发者选项 → **USB 调试** 打开")
-        print("      （本来就开着的话，关掉再打开一次）")
-        print("   3) 下拉通知栏 → 点「USB 连接方式」→ 选「传输文件 (MTP)」")
-        print("   4) 手机上若弹出「允许 USB 调试吗？」，勾「始终允许」再点确定")
-        print("   5) 改完在命令行敲一次：adb devices —— 看到一串设备号就成了")
+        print("   检查：数据线插好 / 开发者选项里打开「USB 调试」/ 手机上允许调试")
         return 2
-    panel_w, panel_h = info.width, info.height       # 自然方向（竖屏）
-    screen_w, screen_h = info.height, info.width     # 游戏横屏逻辑尺寸
-    stream_size = cfg["vision"].get("stream_size", "1280x592")
-    sw, sh = (int(v) for v in stream_size.lower().split("x"))
-    geom = FieldGeometry((sw, sh), screen_w, screen_h)
-    print(f"手机 {info.model}  面板 {panel_w}x{panel_h}  横屏 {screen_w}x{screen_h}")
+    panel_w, panel_h = info.width, info.height
+    screen_w, screen_h = info.height, info.width            # 游戏是横屏
+    field = geometry.field_for(screen_w, screen_h)
+    offset_ms = (cfg["play"].get("offset_ms", 0.0) if args.offset_ms is None
+                 else args.offset_ms)
+    print(f"手机 {info.model}  Android {info.android}  面板 {panel_w}x{panel_h}")
+    print(f"几何 {field.describe()}    偏移 {offset_ms:+.0f} ms")
+    print(f"谱面 {name}（{music} {difficulty}）：{len(events)} 个落指事件，"
+          f"第 1 个在 {first.time_ms / 1000:.2f}s，最后一个在 {events[-1].time_ms / 1000:.1f}s")
 
-    node = find_touch_node(dev, panel_w)
+    # 先把动作表算好（按下之后只做一次"平移起跑"）
+    t_build = time.perf_counter()
+    acts = schedule.build_actions(events, field)
+    n_hold = sum(1 for e in events if e.is_hold)
+    n_flick = sum(1 for e in events if e.kind == "flick" and not e.is_hold)
+    print(f"动作表已就绪：{len(acts)} 个动作（长条 {n_hold} · 轻扫 {n_flick}），"
+          f"耗时 {(time.perf_counter() - t_build) * 1000:.0f} ms")
+
+    # 先认确认页（只看画面，不碰触摸）
+    node, unit = find_touch_device(dev, panel_w)
     print(f"真实触摸屏节点 {node}")
-
+    tpl = find_resource(cfg["paths"]["live_start_template"])
+    screen.wake(dev)
+    print()
+    print("  请在手机上把歌停在「乐队确认」页（右下角有 LIVE START 的那一页）。")
+    print("  认不到就会停下——不会乱点别的坐标。")
     touch = None
-    if not args.observe:
-        touch = make_touch(cfg["touch"], dev, screen_w=screen_w, screen_h=screen_h,
-                           jar=cfg["touch"].get("scrcpy_jar"))
-        touch.start()
-        print(f"触控后端 {type(touch).__name__}")
-
-    stream = ScreenStream(dev, size=stream_size, time_limit=300)
-    stream.start()
-    anchor = None
     try:
-        time.sleep(1.0)
-        if args.start_button:
-            btn = tuple(int(v) for v in args.start_button.split(","))
-        else:
-            btn = wait_confirm_page(dev, stream, (screen_w, screen_h), (sw, sh), log=print)
+        btn = liveui.wait_confirm_page(lambda: screen.grab(dev, log=print), tpl,
+                                       timeout=float(cfg["play"].get("confirm_timeout_s", 120.0)),
+                                       min_score=float(cfg["play"].get("template_score", 0.62)),
+                                       log=print)
         if btn is None:
-            print("等不到「乐队确认页」——请把手机停在那首歌的确认页上再跑")
+            print("  等不到「乐队确认页」——请把手机停在那首歌的确认页上再跑一次")
             return 2
-        print(f"开演键 {btn}，点它")
+        print(f"  点 LIVE START {btn}")
         dev.input_tap(*btn)
         t_start = time.perf_counter()
 
-        path_latency = None
-        if touch is not None and not args.no_calibrate:
-            time.sleep(3.0)                      # 等加载页出来（这期间触摸没人管）
+        # 这时才建 UHID 虚拟触摸屏（趁加载页建，~3 秒）
+        touch = make_touch(cfg["touch"], dev, screen_w=screen_w, screen_h=screen_h,
+                           jar=cfg["touch"].get("scrcpy_jar"))
+        touch.start()
+        print(f"  触控后端 {type(touch).__name__}")
+
+        # 加载页里量往返延迟（这时点屏幕没有副作用）
+        latency = None
+        if not args.no_calibrate:
+            time.sleep(2.5)
             uhid_node = find_uhid_node(dev, panel_w)
             if uhid_node:
-                print(f"UHID 节点 {uhid_node}，在加载页量一次往返延迟…")
-                path_latency = measure_path_latency(
-                    dev, uhid_node, touch, panel_w, panel_h,
-                    spot=(geom.device_x(first.center), geom.device_judge_y), log=print)
+                print(f"  UHID 节点 {uhid_node}，在加载页量一次往返延迟…")
+                latency = measure_roundtrip(dev, uhid_node, touch,
+                                            (field.center_x, field.judge_y), log=print)
             else:
-                print("没找到 UHID 节点，跳过标定")
-        if path_latency is None:
-            path_latency = DEFAULT_PATH_LATENCY
-            print(f"  用缺省往返延迟 {path_latency*1000:.0f} ms")
-        else:
-            print(f"  往返延迟（读取 + 注入）≈ {path_latency*1000:.0f} ms")
+                print("  没找到 UHID 节点，跳过标定")
+        if latency is None:
+            latency = float(cfg["play"].get("default_latency_ms", 35.0)) / 1000.0
+            print(f"  用缺省往返延迟 {latency * 1000:.0f} ms")
 
-        anchor = HumanAnchor(dev, node, panel_w, panel_h, geom, log=lambda *a: None)
-        anchor.start()
-        print("=" * 62)
+        # 等你的第一下（只取时间戳）
+        clock = TouchClock(dev, node, panel_w, panel_h, log=lambda *a: None, scale=unit)
+        clock.start()
+        print(STEP)
         print("  等你的第 1 个音符 —— 演奏画面一出来就正常按下去，按完松手。")
-        if args.observe:
-            print("  （观察模式：脚本不会碰你的手机，只记录）")
-        print("=" * 62)
-        tap = anchor.wait_first(not_before=t_start + ARM_FLOOR_S, timeout=60.0)
-        if tap is None:
-            print("没等到演奏区里的落指，结束")
+        print("  （只取你那一下的内核时间戳当基准；你按在哪不影响落点）")
+        print(STEP)
+        got = clock.wait_down(timeout=180.0, log=print)
+        if got is None:
+            print("没等到落指，结束")
             return 2
+        _idx, t_dev, t_host = got
+        t0 = t_host - latency - first.time_ms / 1000.0 + offset_ms / 1000.0
+        print(f"锚点：内核 {t_dev:.3f}s / 本机 {t_host:.3f}s，往返延迟 {latency * 1000:.0f} ms")
+        print(f"      ⇒ 谱面 0 点 = 本机 {t0:.3f}s")
 
-        t0 = tap.t_host - path_latency - first.time_ms / 1000.0 + args.offset_ms / 1000.0
-        print(f"锚点：内核 {tap.t_dev:.3f}s / 本机 {tap.t_host:.3f}s，"
-              f"落点 ({tap.x}, {tap.y})，音心 {tap.lane:.2f}"
-              f"（第 1 个音符音心 {first.center:.1f}）")
-
-        if args.observe:
-            print()
-            print("观察模式：继续按你自己的节奏打，脚本只对时间。按 Ctrl+C 结束。")
-            n = len(anchor.taps)
-            while True:
-                for t in anchor.poll():
-                    i, res = match_tap(t, events, t0)
-                    n += 1
-                    if i is None:
-                        print(f"  第 {n} 次落指 音心 {t.lane:5.2f} —— 对不上谱面"
-                              f"（超出 160 ms，或轨道不对）")
-                    else:
-                        print(f"  第 {n} 次落指 音心 {t.lane:5.2f} → 谱面第 {i+1} 个音符 "
-                              f"{events[i].time_ms/1000:6.2f}s，残差 {res*1000:+6.0f} ms")
-                time.sleep(0.01)
-
-        now = time.perf_counter()
+        # 从还没过期的那个音符起接管
+        now_rel = time.perf_counter() - t0
+        lead = float(cfg["play"].get("handover_lead_s", 0.015))
         start_index = 0
         while (start_index < len(events)
-               and t0 + events[start_index].time_ms / 1000.0 < now + HANDOVER_LEAD_S):
+               and events[start_index].time_ms / 1000.0 < now_rel + lead):
             start_index += 1
         if start_index >= len(events):
             print("锚点太晚，没有剩下可打的音符")
             return 2
-        print(f"从第 {start_index+1} 个音符（{events[start_index].time_ms/1000:.2f}s）"
+        print(f"从第 {start_index + 1} 个音符（{events[start_index].time_ms / 1000:.2f}s）"
               f"开始接管，跳过前面 {start_index} 个")
 
-        acts = build_schedule(events, t0, geom, start_index)
-        seg = events[start_index:]
-        n_hold = sum(1 for e in seg if e.is_hold)
-        n_move = sum(1 for e in seg
-                     if e.is_hold and len({c for _t, c in (e.path or ())}) > 1)
-        n_flick = sum(1 for e in seg if e.kind == "flick" and not e.is_hold)
-        n_tailf = sum(1 for e in seg if getattr(e, "tail_flick", ""))
-        if n_hold or n_flick:
-            extra = f"，其中尾巴要上/侧滑的 {n_tailf} 个" if n_tailf else ""
-            print(f"  这一段：长条 {n_hold} 个（会横移的 {n_move} 个{extra}）、"
-                  f"轻扫 {n_flick} 个")
-        mix: dict[str, int] = {}
-        for _t, k, _s, _x, _y in acts:
-            mix[k] = mix.get(k, 0) + 1
-        end_limit = t0 + events[-1].time_ms / 1000.0 + 12.0
+        # 用预计算好的动作表：丢掉已经过去的（保留刚过去 0.25s 内的 down，长条还接得上）
+        t_cut = now_rel - 0.25
+        live_slots: set[int] = set()
+        plan = []
+        for t_rel, kind, slot, x, y in acts:
+            if t_rel < t_cut:
+                if not (kind == "down" and slot not in live_slots):
+                    continue
+            if kind == "down":
+                live_slots.add(slot)
+            elif slot not in live_slots:
+                continue
+            plan.append((t_rel, kind, slot, x, y))
+        end_rel = events[-1].time_ms / 1000.0 + 12.0
         late = 0
         done = 0
-        for at, kind, slot, x, y in acts:
-            if time.perf_counter() > end_limit:
+        mix: dict[str, int] = {}
+        for t_rel, kind, slot, x, y in plan:
+            if time.perf_counter() - t0 > end_rel:
                 break
-            if sleep_until(at) > 0.05:
+            if sleep_until(t0 + t_rel) > 0.05:
                 late += 1
             try:
                 if kind == "down":
@@ -674,29 +433,32 @@ def main() -> int:
                 else:
                     touch.up(slot)
                 done += 1
+                mix[kind] = mix.get(kind, 0) + 1
             except Exception as exc:  # noqa: BLE001
                 print(f"  触控异常：{exc}")
-        print(f"注入完成：{done}/{len(acts)} 个动作"
+        print(f"注入完成：{done}/{len(plan)} 个动作"
               f"（按下 {mix.get('down', 0)} · 划动 {mix.get('move', 0)}"
-              f" · 抬起 {mix.get('up', 0)}）"
-              + (f"，{late} 个迟到 >50ms" if late else ""))
-        left = end_limit - time.perf_counter()
+              f" · 抬起 {mix.get('up', 0)}）" + (f"，{late} 个迟到 >50ms" if late else ""))
+        left = t0 + end_rel - time.perf_counter()
         if left > 0:
             time.sleep(left)
     except KeyboardInterrupt:
         print("\n手动中断")
     finally:
-        if anchor is not None:
-            anchor.stop()
-        stream.stop()
-        if touch is not None:
-            touch.close()
+        try:
+            if touch is not None:
+                touch.close()
+        except Exception:  # noqa: BLE001
+            pass
         sys.stdout = sys.__stdout__
         try:
             logfile.flush()
             logfile.close()
         except Exception:  # noqa: BLE001
             pass
+    print()
+    print("打完了。去结算页看命中率：整体偏早/偏晚就调 config\\default.yaml 里的 offset_ms")
+    print(f"日志：{logpath}")
     return 0
 
 

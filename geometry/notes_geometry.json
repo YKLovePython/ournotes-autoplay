@@ -1,0 +1,46 @@
+{
+  "_说明": "演奏区几何。数值全部来自游戏自己的数据，不是量画面量出来的。改游戏版本后重导一次即可（tools/reexport_scene.bat）。",
+  "schema": "diting.geometry/1",
+  "导出时间": "2026-10-16",
+  "导出方式": {
+    "工具": "nnnotes 0.1.2（社区工具链）",
+    "命令": "nnnotes export -o <out> --select key:EmbScene/Live --views none",
+    "需要的输入": "base.apk + Master*.bin + Addressables catalog（本机取的）+ 社区公开的 bundle/master 密钥",
+    "导出物": "场景预制体 scene_scenes_embscene_live（含 LiveGameLane / LiveGameCamera / screen_root）"
+  },
+  "来源出处": {
+    "谱面格数与平面尺寸": "游戏代码 LiveBootDataCreator.CreateViewData → LiveSettingCreator.CreateLaneViewSettings（LANE_VIEW：size 1920x1080、topRange 0.05、bottomRange 1.0、judgementScreenBottomPosition 2.24、topPosition 0）",
+    "判定格位置": "JudgementPositionLogic.GetJudgementPositions",
+    "透视顶点": "LiveViewUtility.GetNoteSpawnPosition（两侧边交点）",
+    "平面到屏幕的映射": "LiveGameCamera 透视 fov=54°；判定平面挂在 LiveGameCamera/screen_root（距相机 10.6078，该处视锥半高 5.4048 ≈ 平面半高 5.4）；Live/LiveMainCamera 正交 size 5.4",
+    "场景实物佐证": "LiveGameView/root/LiveGameLane（_laneWidth 19.12、_laneCount 12）、lines 的 _splitCountType 2（6 主线 + 12 副线）、screen_root/judgement_positions/*（y=-3.160）"
+  },
+  "常量": {
+    "lane_count": 24,
+    "plane_width": 19.2,
+    "plane_height": 10.8,
+    "plane_top_y": 5.4,
+    "plane_bottom_y": -5.4,
+    "judge_plane_y": -3.16,
+    "apex_plane_y": 5.9684,
+    "lane_pitch_plane": 0.64237,
+    "half_width_plane": 7.7085,
+    "visual_lane_count": 12,
+    "notes": [
+      "一格的平面宽度 = 0.64237，判定线处 ±7.7085（= 0.64237 × 12）",
+      "判定线自顶向下占平面高 (5.4 - (-3.16)) / 10.8 = 79.259%",
+      "平面 1:1 铺满屏幕高度：1 平面单位 = 屏高 H / 10.8 像素；横向居中，宽屏多出来的宽度是留白",
+      "游戏里可见 12 条车道（6 主线 + 12 副线），谱面是 24 格；'7 轨'是把 6 条主线的 7 个区间误看成了轨道"
+    ]
+  },
+  "实机复核": {
+    "设备": "2510x1156（Xiaomi 2510DRK44C，横屏）",
+    "材料": "手机上抓的 2510x1156 无损 PNG 截图（旧 debug 目录），脚本自动筛出 31 张整屏演奏画面",
+    "判定线": "实测两条紫线在 75.4% 与 83.0% 屏高；模型判定线 79.26%（= 两者正中），相机正投影算得 79.11%",
+    "车道线间距": "31 张的中位残差 -1.5 px（-1.1%），散布 -3.0 ~ +4.0 px（模型 137.5 px，实测中位 136.0 px）",
+    "最外侧车道线": "实测 440 / 模型 430（+10 px：最外侧是 out_side_line 装饰线，本来就画在轨道外一点）",
+    "按屏宽那一套": "会给出 168.3 px 的间距，与实测差 24% —— 已排除",
+    "结论": "按屏高缩放 + 判定线 79.26% 成立。旧代码用的 83.04%（下面那条紫线）偏低 44 px，横向偏宽 5.5%，最外侧格落点偏 37 px（掉到最外侧车道命中区之外）",
+    "复核脚本": "tools/verify_geometry.py（拿整屏截图让程序自己量，不需要手机、不需要人看图）"
+  }
+}
